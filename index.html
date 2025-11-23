@@ -4,7 +4,11 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Guided Breathing Tracker</title>
-    <!-- Load Tailwind CSS -->
+    <!-- 
+        NOTE: The following line is the Tailwind CSS CDN. 
+        It generates a "production warning" in the console, 
+        but it is necessary to run this single-file demo without a build step.
+    -->
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
         /* Define custom keyframes for the breathing animation
@@ -111,24 +115,38 @@
         import { getFirestore, collection, addDoc, query, onSnapshot, getDocs, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // --- EXTERNAL FIREBASE CONFIGURATION (For GitHub Pages/Local Hosting) ---
-        // If you are running this app outside of the Canvas environment, the cloud configuration 
-        // globals are missing. To enable cloud synchronization (History), uncomment the 
-        // configuration below and replace the placeholders with your own Firebase project details.
-        const firebaseConfig = {
-          apiKey: "AIzaSyD7n120x22gmS2Oo_N3yGkOjwC-SIa80hI",
-          authDomain: "breathing-tracker-app.firebaseapp.com",
-          projectId: "breathing-tracker-app",
-          storageBucket: "breathing-tracker-app.firebasestorage.app",
-          messagingSenderId: "638502216762",
-          appId: "1:638502216762:web:8c7f05acc0e2d2a7f48103",
-          measurementId: "G-ZV86RJNHR1"
+        // 🚨 IMPORTANT: This configuration object now contains your project keys.
+        // It will be used only if the app is run outside the Canvas environment.
+        const EXTERNAL_FIREBASE_CONFIG = {
+            apiKey: "AIzaSyD7n120x22gmS2Oo_N3yGkOjwC-SIa80hI", 
+            authDomain: "breathing-tracker-app.firebaseapp.com", 
+            projectId: "breathing-tracker-app", 
+            storageBucket: "breathing-tracker-app.firebasestorage.app", 
+            messagingSenderId: "638502216762", 
+            appId: "1:638502216762:web:8c7f05acc0e2d2a7f48103",
+            measurementId: "G-ZV86RJNHR1"
         };
 
-        // --- GLOBAL CONSTANTS ---
-        // 1. Prioritize the Canvas injected config, otherwise use the EXTERNAL_FIREBASE_CONFIG
+        // --- GLOBAL CONSTANTS & CONFIG MERGING ---
+
+        // 1. Determine the final configuration object (prioritizing Canvas environment)
+        let finalFirebaseConfig = {};
+        
+        // Try to load and parse Canvas injected config
         const canvasConfigStr = typeof __firebase_config !== 'undefined' ? __firebase_config : '{}';
-        const canvasConfig = JSON.parse(canvasConfigStr);
-        const firebaseConfig = Object.keys(canvasConfig).length > 0 ? canvasConfig : EXTERNAL_FIREBASE_CONFIG;
+        try {
+            const canvasConfig = JSON.parse(canvasConfigStr);
+            if (Object.keys(canvasConfig).length > 0) {
+                finalFirebaseConfig = canvasConfig;
+            }
+        } catch (e) {
+            console.error("Error parsing Canvas config. Using External config as fallback.", e);
+        }
+        
+        // If Canvas config is empty, use the external config if it has keys
+        if (Object.keys(finalFirebaseConfig).length === 0 && Object.keys(EXTERNAL_FIREBASE_CONFIG).length > 0) {
+             finalFirebaseConfig = EXTERNAL_FIREBASE_CONFIG;
+        }
         
         // 2. Auth token (only available in Canvas environment)
         const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
@@ -225,8 +243,8 @@
 
         async function initFirebase() {
             try {
-                // Check if firebaseConfig is empty (which it will be on GH Pages until configured)
-                if (Object.keys(firebaseConfig).length === 0) {
+                // Check if the final configuration object is empty
+                if (Object.keys(finalFirebaseConfig).length === 0) {
                     console.warn("Firebase config is empty. Running in OFFLINE mode.");
                     authStatusDisplay.textContent = "Offline Mode";
                     authStatusDisplay.classList.replace('text-yellow-500', 'text-orange-500');
@@ -235,7 +253,7 @@
                     return; // Skip all Firebase initialization
                 }
 
-                app = initializeApp(firebaseConfig);
+                app = initializeApp(finalFirebaseConfig);
                 auth = getAuth(app);
                 db = getFirestore(app);
                 isFirebaseReady = true;
