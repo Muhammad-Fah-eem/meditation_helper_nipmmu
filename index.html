@@ -68,7 +68,6 @@
         </div>
 
         <!-- Control Button -->
-        <!-- Removed inline onclick, now attached programmatically -->
         <button id="toggle-button" class="w-full py-3 px-6 rounded-lg font-bold text-lg text-white transition duration-200 shadow-lg transform hover:scale-[1.02] active:scale-[0.98]" style="background-color: #4f46e5;">
             Start Breathing
         </button>
@@ -90,11 +89,9 @@
             <label for="history-file-input" class="cursor-pointer w-full py-2 px-4 rounded-lg text-sm font-semibold text-center text-indigo-300 bg-indigo-900/50 hover:bg-indigo-900 transition duration-150 shadow-md">
                 Merge/Upload History File (JSON)
             </label>
-            <!-- Removed inline onchange, now attached programmatically -->
             <input type="file" id="history-file-input" accept=".json" class="hidden">
             
             <!-- Download Button -->
-            <!-- Removed inline onclick, now attached programmatically -->
             <button id="download-button" class="w-full py-2 px-4 rounded-lg text-sm font-semibold text-white bg-green-600 hover:bg-green-700 transition duration-150 shadow-md">
                 Download Full History (Save Cloud Data)
             </button>
@@ -113,10 +110,32 @@
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, setPersistence, browserLocalPersistence } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, collection, addDoc, query, onSnapshot, getDocs, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
+        // --- EXTERNAL FIREBASE CONFIGURATION (For GitHub Pages/Local Hosting) ---
+        // If you are running this app outside of the Canvas environment, the cloud configuration 
+        // globals are missing. To enable cloud synchronization (History), uncomment the 
+        // configuration below and replace the placeholders with your own Firebase project details.
+        const firebaseConfig = {
+          apiKey: "AIzaSyD7n120x22gmS2Oo_N3yGkOjwC-SIa80hI",
+          authDomain: "breathing-tracker-app.firebaseapp.com",
+          projectId: "breathing-tracker-app",
+          storageBucket: "breathing-tracker-app.firebasestorage.app",
+          messagingSenderId: "638502216762",
+          appId: "1:638502216762:web:8c7f05acc0e2d2a7f48103",
+          measurementId: "G-ZV86RJNHR1"
+        };
+
         // --- GLOBAL CONSTANTS ---
-        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        // 1. Prioritize the Canvas injected config, otherwise use the EXTERNAL_FIREBASE_CONFIG
+        const canvasConfigStr = typeof __firebase_config !== 'undefined' ? __firebase_config : '{}';
+        const canvasConfig = JSON.parse(canvasConfigStr);
+        const firebaseConfig = Object.keys(canvasConfig).length > 0 ? canvasConfig : EXTERNAL_FIREBASE_CONFIG;
+        
+        // 2. Auth token (only available in Canvas environment)
         const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        
+        // 3. App ID (used for Firestore path structure)
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        
         const SESSIONS_COLLECTION = 'sessions';
         setLogLevel('debug'); // Enable debug logging for Firebase
 
@@ -145,6 +164,7 @@
         let app, auth, db;
         let userId = null;
         let unsubscribeSnapshot = null; // Holds the Firestore unsubscribe function
+        let isFirebaseReady = false; // New flag to track successful Firebase initialization
 
         // --- BREATHING CONSTANTS (4-4-6-2) ---
         const INHALE_DURATION = 4000;
@@ -197,6 +217,7 @@
                 console.error("Attempted to get path before userId was set.");
                 return null;
             }
+            // Use the Canvas path structure for consistency
             return `artifacts/${appId}/users/${userId}/${SESSIONS_COLLECTION}`;
         }
         
@@ -204,16 +225,20 @@
 
         async function initFirebase() {
             try {
+                // Check if firebaseConfig is empty (which it will be on GH Pages until configured)
                 if (Object.keys(firebaseConfig).length === 0) {
-                    console.error("Firebase config is empty. Cannot initialize.");
-                    authStatusDisplay.textContent = "Error (No Config)";
-                    authStatusDisplay.classList.replace('text-yellow-500', 'text-red-500');
-                    return;
+                    console.warn("Firebase config is empty. Running in OFFLINE mode.");
+                    authStatusDisplay.textContent = "Offline Mode";
+                    authStatusDisplay.classList.replace('text-yellow-500', 'text-orange-500');
+                    userIdDisplay.textContent = "N/A (No Cloud)";
+                    historyList.innerHTML = '<li class="text-orange-400 italic text-sm text-center py-4">Cloud history is unavailable (Offline Mode).</li>';
+                    return; // Skip all Firebase initialization
                 }
 
                 app = initializeApp(firebaseConfig);
                 auth = getAuth(app);
                 db = getFirestore(app);
+                isFirebaseReady = true;
 
                 // Use session persistence to avoid re-logging on refresh
                 await setPersistence(auth, browserLocalPersistence);
@@ -224,6 +249,7 @@
                         userId = user.uid;
                         authStatusDisplay.textContent = "Synced";
                         authStatusDisplay.classList.replace('text-yellow-500', 'text-green-500');
+                        authStatusDisplay.classList.remove('text-orange-500');
                         userIdDisplay.textContent = userId;
                         
                         // Start real-time listening for history
@@ -243,7 +269,7 @@
                     }
                 });
 
-                // Sign in using the custom token or anonymously
+                // Sign in using the custom token (Canvas) or anonymously (GH Pages)
                 if (initialAuthToken) {
                     await signInWithCustomToken(auth, initialAuthToken);
                 } else {
@@ -254,7 +280,7 @@
                 console.error("Firebase initialization or authentication failed:", error);
                 authStatusDisplay.textContent = "Error";
                 authStatusDisplay.classList.replace('text-yellow-500', 'text-red-500');
-                showMessage(`Authentication failed: ${error.code}`, true);
+                showMessage(`Authentication failed: ${error.code || 'Unknown Error'}`, true);
             }
         }
         
@@ -262,7 +288,7 @@
 
         // Loads and displays the session history using Firestore onSnapshot
         function loadSessionHistory() {
-            if (!db || !userId) return;
+            if (!isFirebaseReady || !db || !userId) return;
 
             // Unsubscribe from any previous listener before setting up a new one
             if (unsubscribeSnapshot) {
@@ -337,7 +363,11 @@
 
         // Saves a new session data to Firestore
         async function saveSession(cycles, duration) {
-            if (cycles <= 0 || !db || !userId) return;
+            if (!isFirebaseReady || cycles <= 0 || !db || !userId) {
+                console.warn("Skipping session save: Firebase not ready (Offline Mode).");
+                showMessage("Session recorded locally, but not saved to cloud (Offline Mode).", true);
+                return;
+            }
 
             const newSession = {
                 cycles: cycles,
@@ -359,8 +389,9 @@
 
         // Function to handle loading of the external JSON file (merges into cloud)
         function loadHistoryFile(event) {
-            if (!db || !userId) {
-                showMessage("Cloud database not ready. Please wait for sync.", true);
+            if (!isFirebaseReady || !db || !userId) {
+                showMessage("Cloud database not ready. Cannot merge history in offline mode.", true);
+                event.target.value = ''; // Clear file input
                 return;
             }
 
@@ -410,8 +441,8 @@
         
         // Function to download the entire Firestore history as a JSON file
         async function downloadHistory() {
-            if (!db || !userId) {
-                showMessage("Cloud database not ready. Cannot download history.", true);
+            if (!isFirebaseReady || !db || !userId) {
+                showMessage("Cloud database not ready. Cannot download history in offline mode.", true);
                 return;
             }
             
@@ -529,7 +560,7 @@
             // Save the session if at least one cycle was completed
             if (cycleCount > 0) {
                 const sessionDuration = Date.now() - sessionStartTime;
-                saveSession(cycleCount, sessionDuration); // Saves to Firestore
+                saveSession(cycleCount, sessionDuration); // Saves to Firestore (or warns if offline)
             }
             
             toggleButton.textContent = "Start Breathing";
@@ -560,7 +591,7 @@
             stopBreathing(); // Sets initial UI state (Ready, 0 cycles)
             initFirebase();
             
-            // --- Programmatically attach event listeners to fix the ReferenceError ---
+            // --- Programmatically attach event listeners ---
             toggleButton.addEventListener('click', toggleBreathing);
             historyFileInput.addEventListener('change', loadHistoryFile);
             downloadButton.addEventListener('click', downloadHistory);
