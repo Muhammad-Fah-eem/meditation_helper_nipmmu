@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Guided Breathing Tracker</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Define custom keyframes for the breathing animation
+           Cycle: 4s Inhale | 4s Hold | 6s Exhale | 2s Pause | Total: 16s */
+        @keyframes breathe {
+            /* 0% Start (min size) */
+            0% { transform: scale(1); box-shadow: 0 0 10px rgba(79, 70, 229, 0.4); }
+
+            /* 4s Inhale: 0% to 25% */
+            25% { transform: scale(1.5); box-shadow: 0 0 40px rgba(79, 70, 229, 0.8); }
+
+            /* 4s Hold: 25% to 50% (maintaining max size) */
+            50% { transform: scale(1.5); box-shadow: 0 0 40px rgba(79, 70, 229, 0.8); }
+
+            /* 6s Exhale: 50% to 87.5% */
+            87.5% { transform: scale(1); box-shadow: 0 0 10px rgba(79, 70, 229, 0.4); }
+
+            /* 2s Pause: 87.5% to 100% (maintaining min size) */
+            100% { transform: scale(1); box-shadow: 0 0 10px rgba(79, 70, 229, 0.4); }
+        }
+
+        /* Class to apply the animation (duration updated to 16s) */
+        .breathing-animation {
+            animation: breathe 16s ease-in-out infinite;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+    </style>
+</head>
+<!-- DARK THEME APPLIED -->
+<body class="bg-gray-900 min-h-screen flex flex-col items-center justify-center p-4">
+
+    <!-- Notification Message Box -->
+    <div id="message-box" class="fixed top-4 right-4 z-50 p-4 rounded-lg shadow-xl text-white transform transition-opacity duration-300 opacity-0 pointer-events-none">
+        <!-- Message content goes here -->
+    </div>
+    <!-- End Notification Message Box -->
+
+    <!-- Main Card Container -->
+    <div class="bg-gray-800 p-8 rounded-xl shadow-2xl w-full max-w-md text-center border border-indigo-700">
+        <h1 class="text-3xl font-extrabold text-white mb-2">4-4-6-2 Breathing Guide</h1>
+        <p class="text-gray-400 mb-6">Inhale (4s) &bull; Hold (4s) &bull; Exhale (6s) &bull; Pause (2s)</p>
+        
+        <!-- Cycle Counter Display -->
+        <div class="mb-4">
+            <span class="text-xl font-medium text-gray-300">Completed Cycles:</span>
+            <span id="cycle-count" class="text-3xl font-extrabold text-indigo-400 ml-2">0</span>
+        </div>
+        <!-- End Cycle Counter Display -->
+
+        <!-- Breathing Visualizer Area -->
+        <div class="relative flex items-center justify-center h-64 my-8">
+            <!-- Animated Circle -->
+            <div id="visualizer" class="w-24 h-24 bg-blue-300 rounded-full transition duration-300 ease-in-out">
+                <div class="w-full h-full flex items-center justify-center">
+                    <span id="phase-text" class="text-white text-lg font-semibold select-none">Ready</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Control Button -->
+        <button id="toggle-button" class="w-full py-3 px-6 rounded-lg font-bold text-lg text-white transition duration-200 shadow-lg transform hover:scale-[1.02] active:scale-[0.98]" style="background-color: #4f46e5;" onclick="toggleBreathing()">
+            Start Breathing
+        </button>
+    </div>
+
+    <!-- History Card Container (Smaller) -->
+    <div class="bg-gray-800 p-6 mt-6 rounded-xl shadow-xl w-full max-w-md border border-gray-700">
+        <h2 class="text-xl font-bold text-white mb-3 border-b border-gray-700 pb-2">Session History (Local)</h2>
+        
+        <!-- File Operations -->
+        <div class="flex flex-col space-y-3 mb-4">
+            <!-- Load Button/Input (Merge/Upload) -->
+            <label for="history-file-input" class="cursor-pointer w-full py-2 px-4 rounded-lg text-sm font-semibold text-center text-indigo-300 bg-indigo-900/50 hover:bg-indigo-900 transition duration-150 shadow-md">
+                Merge/Upload History File (JSON)
+            </label>
+            <input type="file" id="history-file-input" accept=".json" class="hidden" onchange="loadHistoryFile(event)">
+            
+            <!-- Download Button -->
+            <button id="download-button" onclick="downloadHistory()" class="w-full py-2 px-4 rounded-lg text-sm font-semibold text-white bg-green-600 hover:bg-green-700 transition duration-150 shadow-md">
+                Download Full History (Save Progress)
+            </button>
+        </div>
+
+        <!-- History List -->
+        <ul id="history-list" class="divide-y divide-gray-700 max-h-64 overflow-y-auto rounded-lg bg-gray-900/50 p-2">
+            <!-- History items will be inserted here by JavaScript -->
+            <li class="text-gray-500 italic text-sm text-center py-4">No history loaded. Click 'Merge/Upload History File' or start a session.</li>
+        </ul>
+    </div>
+
+
+    <script>
+        // --- DOM REFERENCES ---
+        const visualizer = document.getElementById('visualizer');
+        const phaseText = document.getElementById('phase-text');
+        const toggleButton = document.getElementById('toggle-button');
+        const cycleCountDisplay = document.getElementById('cycle-count');
+        const historyList = document.getElementById('history-list');
+        const messageBox = document.getElementById('message-box');
+
+        // --- APP STATE ---
+        let isBreathing = false;
+        let timerInterval; 
+        let cycleTimer;    
+        let cycleCount = 0;
+        let sessionStartTime; 
+        let messageTimeout;
+
+        // --- BREATHING CONSTANTS (4-4-6-2) ---
+        const INHALE_DURATION = 4000;
+        const HOLD_DURATION = 4000;
+        const EXHALE_DURATION = 6000;
+        const PAUSE_DURATION = 2000;
+        const CYCLE_DURATION = INHALE_DURATION + HOLD_DURATION + EXHALE_DURATION + PAUSE_DURATION; // 16000ms
+
+        // List of all possible color classes to ensure clean removal
+        const ALL_COLORS = ['bg-indigo-500', 'bg-yellow-500', 'bg-green-500', 'bg-blue-300', 'bg-gray-500'];
+
+        // --- UTILITY FUNCTIONS ---
+
+        // Custom function to show temporary notifications
+        function showMessage(message, isError = false) {
+            clearTimeout(messageTimeout);
+            
+            // Set message and style
+            messageBox.textContent = message;
+            messageBox.classList.remove('bg-red-500', 'bg-indigo-500', 'opacity-0');
+            messageBox.classList.add(isError ? 'bg-red-500' : 'bg-indigo-500', 'opacity-100');
+            
+            // Hide after 3 seconds
+            messageTimeout = setTimeout(() => {
+                messageBox.classList.remove('opacity-100');
+                messageBox.classList.add('opacity-0');
+            }, 3000);
+        }
+
+        // Helper to format duration in minutes/seconds
+        function formatDuration(ms) {
+            const totalSeconds = Math.round(ms / 1000);
+            const minutes = Math.floor(totalSeconds / 60);
+            const seconds = totalSeconds % 60;
+            return `${minutes}m ${seconds}s`;
+        }
+        
+        // Helper function to format date for grouping (e.g., "November 23, 2025")
+        function formatDateForGrouping(timestamp) {
+            const date = new Date(timestamp);
+            const options = { year: 'numeric', month: 'long', day: 'numeric' };
+            return date.toLocaleDateString(undefined, options);
+        }
+
+
+        // --- INDEXEDDB LOGIC (SINGLE SOURCE OF TRUTH) ---
+        const DB_NAME = 'BreathingAppDB';
+        const DB_VERSION = 2; // Increased version to guarantee upgrade/creation
+        const STORE_NAME = 'sessions';
+        let db;
+
+        // Helper to open the database
+        function openDB() {
+            return new Promise((resolve, reject) => {
+                const request = indexedDB.open(DB_NAME, DB_VERSION);
+
+                request.onupgradeneeded = function(event) {
+                    db = event.target.result;
+                    // Create object store if it doesn't exist
+                    if (!db.objectStoreNames.contains(STORE_NAME)) {
+                        const objectStore = db.createObjectStore(STORE_NAME, { keyPath: 'id', autoIncrement: true });
+                        objectStore.createIndex('timestamp', 'timestamp', { unique: false });
+                    }
+                };
+
+                request.onsuccess = function(event) {
+                    db = event.target.result;
+                    resolve(db);
+                };
+
+                request.onerror = function(event) {
+                    console.error("IndexedDB error:", event.target.errorCode);
+                    reject(event.target.errorCode);
+                };
+            });
+        }
+
+        // Loads and displays the session history from IndexedDB, grouped by date
+        async function loadSessionHistory() {
+            if (!db) return;
+
+            historyList.innerHTML = '';
+            const transaction = db.transaction([STORE_NAME], 'readonly');
+            const store = transaction.objectStore(STORE_NAME);
+            
+            // We use the index to efficiently retrieve all records
+            const request = store.index('timestamp').getAll(); 
+
+            request.onsuccess = function(event) {
+                let sessions = event.target.result || [];
+                
+                // Sort by timestamp descending (most recent first)
+                sessions.sort((a, b) => b.timestamp - a.timestamp);
+
+                if (sessions.length === 0) {
+                    historyList.innerHTML = '<li class="text-gray-500 italic text-sm text-center py-4">No history found in local storage.</li>';
+                    return;
+                }
+
+                // Group sessions by date
+                const groupedSessions = sessions.reduce((groups, session) => {
+                    const dateKey = formatDateForGrouping(session.timestamp);
+                    if (!groups[dateKey]) {
+                        groups[dateKey] = [];
+                    }
+                    groups[dateKey].push(session);
+                    return groups;
+                }, {});
+
+                // Render groups
+                for (const dateKey in groupedSessions) {
+                    // 1. Add Date Header (sticky in the scrolling container)
+                    const headerLi = document.createElement('li');
+                    // Styling for dark theme, sticky header within the ul
+                    headerLi.className = 'sticky top-0 bg-gray-800/95 py-2 mt-2 font-bold text-sm text-indigo-400 border-b border-indigo-600 uppercase tracking-wider text-center';
+                    headerLi.textContent = dateKey;
+                    historyList.appendChild(headerLi);
+                    
+                    // 2. Add Sessions for this date
+                    groupedSessions[dateKey].forEach((session) => {
+                        const cycles = session.cycles;
+                        const durationText = formatDuration(session.duration);
+                        // Get just the time for the row display (e.g., 07:45 PM)
+                        const time = new Date(session.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); 
+                        
+                        const li = document.createElement('li');
+                        // Styled for dark theme, flex layout for single row
+                        li.className = 'flex justify-between items-center py-2 px-1 border-b border-gray-700/50 hover:bg-gray-700 transition duration-100';
+                        li.innerHTML = `
+                            <span class="text-sm font-semibold text-gray-300 w-1/4 text-left">${time}</span>
+                            <span class="text-lg font-bold text-indigo-400 w-1/4 text-center">${cycles}</span>
+                            <span class="text-sm text-gray-400 w-1/4 text-right">${durationText}</span>
+                        `;
+                        historyList.appendChild(li);
+                    });
+                }
+            };
+
+            request.onerror = function(event) {
+                console.error("Error retrieving sessions:", event.target.error);
+                historyList.innerHTML = '<li class="text-red-400 text-sm text-center py-2">Error loading history.</li>';
+            };
+        }
+
+        // Saves a new session data to IndexedDB
+        function saveSession(cycles, duration) {
+            if (cycles <= 0 || !db) return;
+
+            const newSession = {
+                cycles: cycles,
+                duration: duration,
+                timestamp: Date.now() 
+            };
+            
+            const transaction = db.transaction([STORE_NAME], 'readwrite');
+            const store = transaction.objectStore(STORE_NAME);
+            const request = store.add(newSession);
+
+            request.onsuccess = function() {
+                console.log("Session saved successfully to IndexedDB.");
+                loadSessionHistory(); // Refresh the display
+            };
+
+            request.onerror = function(event) {
+                console.error("Error saving session to IndexedDB:", event.target.error);
+            };
+        }
+        
+        // --- FILE OPERATIONS ---
+
+        // Function to handle loading of the external JSON file
+        function loadHistoryFile(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = async function(e) {
+                try {
+                    const externalSessions = JSON.parse(e.target.result);
+                    if (!Array.isArray(externalSessions)) {
+                        throw new Error("File content is not a valid JSON array.");
+                    }
+                    
+                    if (!db) {
+                        showMessage("Database not ready. Please try loading the file again.", true);
+                        return;
+                    }
+                    
+                    // Start transaction to add all sessions
+                    const transaction = db.transaction([STORE_NAME], 'readwrite');
+                    const store = transaction.objectStore(STORE_NAME);
+                    
+                    let importedCount = 0;
+                    externalSessions.forEach(session => {
+                        // Ensure required fields exist before importing
+                        if (session.cycles !== undefined && session.duration !== undefined && session.timestamp !== undefined) {
+                            // Clear 'id' if present, so IndexedDB can assign a new one
+                            delete session.id; 
+                            store.add(session);
+                            importedCount++;
+                        }
+                    });
+
+                    transaction.oncomplete = () => {
+                        showMessage(`Successfully merged ${importedCount} sessions into local history!`);
+                        loadSessionHistory(); // Reload and display combined history
+                    };
+
+                    transaction.onerror = (err) => {
+                        console.error("IndexedDB import error:", err);
+                        showMessage("Error importing data into database. Check console for details.", true);
+                    };
+
+                } catch (error) {
+                    console.error("Error processing file:", error);
+                    showMessage(`Error processing file: ${error.message}`, true);
+                }
+            };
+            reader.readAsText(file);
+            event.target.value = ''; // Clear file input
+        }
+        
+        // Function to download the entire IndexedDB history as a JSON file
+        function downloadHistory() {
+            if (!db) {
+                showMessage("Database not ready. Cannot download history.", true);
+                return;
+            }
+            
+            const transaction = db.transaction([STORE_NAME], 'readonly');
+            const store = transaction.objectStore(STORE_NAME);
+            const request = store.getAll();
+
+            request.onsuccess = function(event) {
+                const sessions = event.target.result || [];
+                if (sessions.length === 0) {
+                    showMessage("No history to download!");
+                    return;
+                }
+                
+                // Use a Blob to create the file and trigger a download
+                const dataStr = JSON.stringify(sessions, null, 2);
+                const blob = new Blob([dataStr], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'breathing_history.json';
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+                
+                showMessage(`Prepared ${sessions.length} sessions for download. Please save the file.`);
+            };
+
+            request.onerror = function(event) {
+                console.error("Error retrieving data for download:", event.target.error);
+                showMessage("Error preparing data for download. Check console.", true);
+            };
+        }
+
+
+        // --- BREATHING LOGIC ---
+
+        function updateCycleDisplay() {
+            cycleCountDisplay.textContent = cycleCount;
+        }
+
+        function scheduleCycleCounter() {
+            if (!isBreathing) return;
+
+            // Increment the count and update display
+            cycleCount++;
+            updateCycleDisplay();
+
+            // Schedule the next cycle completion
+            cycleTimer = setTimeout(scheduleCycleCounter, CYCLE_DURATION);
+        }
+
+        function updatePhaseText(elapsedTime) {
+            const timeInCycle = elapsedTime % CYCLE_DURATION;
+
+            visualizer.classList.remove(...ALL_COLORS);
+
+            const inhaleEnd = INHALE_DURATION;
+            const holdEnd = inhaleEnd + HOLD_DURATION;
+            const exhaleEnd = holdEnd + EXHALE_DURATION;
+
+            if (timeInCycle < inhaleEnd) {
+                phaseText.textContent = "Inhale...";
+                visualizer.classList.add('bg-indigo-500');
+            } else if (timeInCycle < holdEnd) {
+                phaseText.textContent = "Hold";
+                visualizer.classList.add('bg-yellow-500');
+            } else if (timeInCycle < exhaleEnd) {
+                phaseText.textContent = "Exhale...";
+                visualizer.classList.add('bg-green-500');
+            } else {
+                phaseText.textContent = "Pause";
+                visualizer.classList.add('bg-gray-500'); 
+            }
+        }
+
+        function startBreathing() {
+            if (isBreathing) return;
+
+            isBreathing = true;
+            sessionStartTime = Date.now(); // Record start time
+            toggleButton.textContent = "Stop Breathing";
+            toggleButton.style.backgroundColor = '#ef4444'; // Red
+
+            // 1. Start the CSS animation
+            visualizer.classList.add('breathing-animation');
+            
+            // 2. Start the JavaScript interval for text updates
+            let startTime = Date.now();
+            timerInterval = setInterval(() => {
+                const elapsedTime = Date.now() - startTime;
+                updatePhaseText(elapsedTime);
+            }, 500);
+            
+            // Initial update
+            updatePhaseText(0);
+
+            // 3. Start the cycle counter (wait for the duration of the first cycle)
+            cycleTimer = setTimeout(scheduleCycleCounter, CYCLE_DURATION);
+        }
+
+        function stopBreathing() {
+            if (!isBreathing) return;
+            
+            isBreathing = false;
+            clearInterval(timerInterval);
+            clearTimeout(cycleTimer); 
+
+            // Save the session if at least one cycle was completed
+            if (cycleCount > 0) {
+                const sessionDuration = Date.now() - sessionStartTime;
+                saveSession(cycleCount, sessionDuration); // Saves to IndexedDB
+            }
+            
+            toggleButton.textContent = "Start Breathing";
+            toggleButton.style.backgroundColor = '#4f46e5'; // Indigo (Start Button Color)
+
+            // 1. Stop the CSS animation and reset visualizer
+            visualizer.classList.remove('breathing-animation');
+            visualizer.style.transform = 'scale(1)';
+            visualizer.classList.remove(...ALL_COLORS); 
+            visualizer.classList.add('bg-blue-300'); 
+            phaseText.textContent = "Ready";
+
+            // 2. Reset the cycle count
+            cycleCount = 0;
+            updateCycleDisplay();
+        }
+
+        function toggleBreathing() {
+            if (isBreathing) {
+                stopBreathing();
+            } else {
+                startBreathing();
+            }
+        }
+
+        // Initialize the app state, open the database, and load history
+        window.onload = async () => {
+            stopBreathing(); // Sets initial UI state (Ready, 0 cycles)
+            try {
+                db = await openDB();
+                loadSessionHistory(); // Load any previously stored local data
+            } catch (e) {
+                console.error("Initialization failed:", e);
+                showMessage("Error initializing local database. History saving may not work.", true);
+            }
+        };
+    </script>
+</body>
+</html>
