@@ -68,38 +68,58 @@
         </div>
 
         <!-- Control Button -->
-        <button id="toggle-button" class="w-full py-3 px-6 rounded-lg font-bold text-lg text-white transition duration-200 shadow-lg transform hover:scale-[1.02] active:scale-[0.98]" style="background-color: #4f46e5;" onclick="toggleBreathing()">
+        <!-- Removed inline onclick, now attached programmatically -->
+        <button id="toggle-button" class="w-full py-3 px-6 rounded-lg font-bold text-lg text-white transition duration-200 shadow-lg transform hover:scale-[1.02] active:scale-[0.98]" style="background-color: #4f46e5;">
             Start Breathing
         </button>
     </div>
 
     <!-- History Card Container (Smaller) -->
     <div class="bg-gray-800 p-6 mt-6 rounded-xl shadow-xl w-full max-w-md border border-gray-700">
-        <h2 class="text-xl font-bold text-white mb-3 border-b border-gray-700 pb-2">Session History (Local)</h2>
+        <h2 class="text-xl font-bold text-white mb-3 border-b border-gray-700 pb-2">Session History (Cloud Synced)</h2>
         
+        <!-- User ID and Status -->
+        <div class="text-sm text-gray-400 mb-4 text-center">
+            Status: <span id="auth-status" class="font-semibold text-yellow-500">Connecting...</span>
+            <div class="truncate mt-1">User ID: <span id="user-id-display" class="font-mono text-xs text-gray-500">Loading...</span></div>
+        </div>
+
         <!-- File Operations -->
         <div class="flex flex-col space-y-3 mb-4">
             <!-- Load Button/Input (Merge/Upload) -->
             <label for="history-file-input" class="cursor-pointer w-full py-2 px-4 rounded-lg text-sm font-semibold text-center text-indigo-300 bg-indigo-900/50 hover:bg-indigo-900 transition duration-150 shadow-md">
                 Merge/Upload History File (JSON)
             </label>
-            <input type="file" id="history-file-input" accept=".json" class="hidden" onchange="loadHistoryFile(event)">
+            <!-- Removed inline onchange, now attached programmatically -->
+            <input type="file" id="history-file-input" accept=".json" class="hidden">
             
             <!-- Download Button -->
-            <button id="download-button" onclick="downloadHistory()" class="w-full py-2 px-4 rounded-lg text-sm font-semibold text-white bg-green-600 hover:bg-green-700 transition duration-150 shadow-md">
-                Download Full History (Save Progress)
+            <!-- Removed inline onclick, now attached programmatically -->
+            <button id="download-button" class="w-full py-2 px-4 rounded-lg text-sm font-semibold text-white bg-green-600 hover:bg-green-700 transition duration-150 shadow-md">
+                Download Full History (Save Cloud Data)
             </button>
         </div>
 
         <!-- History List -->
         <ul id="history-list" class="divide-y divide-gray-700 max-h-64 overflow-y-auto rounded-lg bg-gray-900/50 p-2">
             <!-- History items will be inserted here by JavaScript -->
-            <li class="text-gray-500 italic text-sm text-center py-4">No history loaded. Click 'Merge/Upload History File' or start a session.</li>
+            <li class="text-gray-500 italic text-sm text-center py-4">Waiting for cloud data...</li>
         </ul>
     </div>
 
 
-    <script>
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, setPersistence, browserLocalPersistence } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, addDoc, query, onSnapshot, getDocs, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // --- GLOBAL CONSTANTS ---
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const SESSIONS_COLLECTION = 'sessions';
+        setLogLevel('debug'); // Enable debug logging for Firebase
+
         // --- DOM REFERENCES ---
         const visualizer = document.getElementById('visualizer');
         const phaseText = document.getElementById('phase-text');
@@ -107,6 +127,12 @@
         const cycleCountDisplay = document.getElementById('cycle-count');
         const historyList = document.getElementById('history-list');
         const messageBox = document.getElementById('message-box');
+        const authStatusDisplay = document.getElementById('auth-status');
+        const userIdDisplay = document.getElementById('user-id-display');
+        
+        // NEW REFERENCES for event listeners
+        const historyFileInput = document.getElementById('history-file-input');
+        const downloadButton = document.getElementById('download-button');
 
         // --- APP STATE ---
         let isBreathing = false;
@@ -115,6 +141,10 @@
         let cycleCount = 0;
         let sessionStartTime; 
         let messageTimeout;
+        
+        let app, auth, db;
+        let userId = null;
+        let unsubscribeSnapshot = null; // Holds the Firestore unsubscribe function
 
         // --- BREATHING CONSTANTS (4-4-6-2) ---
         const INHALE_DURATION = 4000;
@@ -149,7 +179,9 @@
             const totalSeconds = Math.round(ms / 1000);
             const minutes = Math.floor(totalSeconds / 60);
             const seconds = totalSeconds % 60;
-            return `${minutes}m ${seconds}s`;
+            // Pad seconds with leading zero if needed
+            const paddedSeconds = seconds < 10 ? '0' + seconds : seconds;
+            return `${minutes}m ${paddedSeconds}s`;
         }
         
         // Helper function to format date for grouping (e.g., "November 23, 2025")
@@ -159,134 +191,180 @@
             return date.toLocaleDateString(undefined, options);
         }
 
-
-        // --- INDEXEDDB LOGIC (SINGLE SOURCE OF TRUTH) ---
-        const DB_NAME = 'BreathingAppDB';
-        const DB_VERSION = 2; // Increased version to guarantee upgrade/creation
-        const STORE_NAME = 'sessions';
-        let db;
-
-        // Helper to open the database
-        function openDB() {
-            return new Promise((resolve, reject) => {
-                const request = indexedDB.open(DB_NAME, DB_VERSION);
-
-                request.onupgradeneeded = function(event) {
-                    db = event.target.result;
-                    // Create object store if it doesn't exist
-                    if (!db.objectStoreNames.contains(STORE_NAME)) {
-                        const objectStore = db.createObjectStore(STORE_NAME, { keyPath: 'id', autoIncrement: true });
-                        objectStore.createIndex('timestamp', 'timestamp', { unique: false });
-                    }
-                };
-
-                request.onsuccess = function(event) {
-                    db = event.target.result;
-                    resolve(db);
-                };
-
-                request.onerror = function(event) {
-                    console.error("IndexedDB error:", event.target.errorCode);
-                    reject(event.target.errorCode);
-                };
-            });
+        // Helper function to get the current user's private sessions path
+        function getSessionsPath() {
+            if (!userId) {
+                console.error("Attempted to get path before userId was set.");
+                return null;
+            }
+            return `artifacts/${appId}/users/${userId}/${SESSIONS_COLLECTION}`;
         }
+        
+        // --- FIREBASE INITIALIZATION & AUTH ---
 
-        // Loads and displays the session history from IndexedDB, grouped by date
-        async function loadSessionHistory() {
-            if (!db) return;
-
-            historyList.innerHTML = '';
-            const transaction = db.transaction([STORE_NAME], 'readonly');
-            const store = transaction.objectStore(STORE_NAME);
-            
-            // We use the index to efficiently retrieve all records
-            const request = store.index('timestamp').getAll(); 
-
-            request.onsuccess = function(event) {
-                let sessions = event.target.result || [];
-                
-                // Sort by timestamp descending (most recent first)
-                sessions.sort((a, b) => b.timestamp - a.timestamp);
-
-                if (sessions.length === 0) {
-                    historyList.innerHTML = '<li class="text-gray-500 italic text-sm text-center py-4">No history found in local storage.</li>';
+        async function initFirebase() {
+            try {
+                if (Object.keys(firebaseConfig).length === 0) {
+                    console.error("Firebase config is empty. Cannot initialize.");
+                    authStatusDisplay.textContent = "Error (No Config)";
+                    authStatusDisplay.classList.replace('text-yellow-500', 'text-red-500');
                     return;
                 }
 
-                // Group sessions by date
-                const groupedSessions = sessions.reduce((groups, session) => {
-                    const dateKey = formatDateForGrouping(session.timestamp);
-                    if (!groups[dateKey]) {
-                        groups[dateKey] = [];
-                    }
-                    groups[dateKey].push(session);
-                    return groups;
-                }, {});
+                app = initializeApp(firebaseConfig);
+                auth = getAuth(app);
+                db = getFirestore(app);
 
-                // Render groups
-                for (const dateKey in groupedSessions) {
-                    // 1. Add Date Header (sticky in the scrolling container)
-                    const headerLi = document.createElement('li');
-                    // Styling for dark theme, sticky header within the ul
-                    headerLi.className = 'sticky top-0 bg-gray-800/95 py-2 mt-2 font-bold text-sm text-indigo-400 border-b border-indigo-600 uppercase tracking-wider text-center';
-                    headerLi.textContent = dateKey;
-                    historyList.appendChild(headerLi);
-                    
-                    // 2. Add Sessions for this date
-                    groupedSessions[dateKey].forEach((session) => {
-                        const cycles = session.cycles;
-                        const durationText = formatDuration(session.duration);
-                        // Get just the time for the row display (e.g., 07:45 PM)
-                        const time = new Date(session.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); 
+                // Use session persistence to avoid re-logging on refresh
+                await setPersistence(auth, browserLocalPersistence);
+
+                // Set up auth state change listener
+                onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        authStatusDisplay.textContent = "Synced";
+                        authStatusDisplay.classList.replace('text-yellow-500', 'text-green-500');
+                        userIdDisplay.textContent = userId;
                         
-                        const li = document.createElement('li');
-                        // Styled for dark theme, flex layout for single row
-                        li.className = 'flex justify-between items-center py-2 px-1 border-b border-gray-700/50 hover:bg-gray-700 transition duration-100';
-                        li.innerHTML = `
-                            <span class="text-sm font-semibold text-gray-300 w-1/4 text-left">${time}</span>
-                            <span class="text-lg font-bold text-indigo-400 w-1/4 text-center">${cycles}</span>
-                            <span class="text-sm text-gray-400 w-1/4 text-right">${durationText}</span>
-                        `;
-                        historyList.appendChild(li);
-                    });
-                }
-            };
+                        // Start real-time listening for history
+                        loadSessionHistory(); 
+                    } else {
+                        userId = null;
+                        authStatusDisplay.textContent = "Signed Out";
+                        authStatusDisplay.classList.replace('text-green-500', 'text-yellow-500');
+                        userIdDisplay.textContent = "N/A";
 
-            request.onerror = function(event) {
-                console.error("Error retrieving sessions:", event.target.error);
-                historyList.innerHTML = '<li class="text-red-400 text-sm text-center py-2">Error loading history.</li>';
-            };
+                        // If the listener was active, stop it
+                        if (unsubscribeSnapshot) {
+                            unsubscribeSnapshot();
+                            unsubscribeSnapshot = null;
+                        }
+                        historyList.innerHTML = '<li class="text-gray-500 italic text-sm text-center py-4">Sign in required to load history.</li>';
+                    }
+                });
+
+                // Sign in using the custom token or anonymously
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+
+            } catch (error) {
+                console.error("Firebase initialization or authentication failed:", error);
+                authStatusDisplay.textContent = "Error";
+                authStatusDisplay.classList.replace('text-yellow-500', 'text-red-500');
+                showMessage(`Authentication failed: ${error.code}`, true);
+            }
+        }
+        
+        // --- FIREBASE CRUD & HISTORY LOADING ---
+
+        // Loads and displays the session history using Firestore onSnapshot
+        function loadSessionHistory() {
+            if (!db || !userId) return;
+
+            // Unsubscribe from any previous listener before setting up a new one
+            if (unsubscribeSnapshot) {
+                unsubscribeSnapshot();
+            }
+
+            const sessionsRef = collection(db, getSessionsPath());
+            
+            // Set up the real-time listener
+            unsubscribeSnapshot = onSnapshot(sessionsRef, (snapshot) => {
+                const sessions = [];
+                snapshot.forEach(doc => {
+                    sessions.push(doc.data());
+                });
+
+                // Client-side sort by timestamp descending (newest first)
+                sessions.sort((a, b) => b.timestamp - a.timestamp);
+
+                renderHistory(sessions);
+            }, (error) => {
+                console.error("Firestore snapshot error:", error);
+                historyList.innerHTML = '<li class="text-red-400 text-sm text-center py-2">Error loading history from cloud.</li>';
+                showMessage("Could not load history from cloud.", true);
+            });
         }
 
-        // Saves a new session data to IndexedDB
-        function saveSession(cycles, duration) {
-            if (cycles <= 0 || !db) return;
+        // Renders the session history list
+        function renderHistory(sessions) {
+            historyList.innerHTML = ''; // Clear existing list
+
+            if (sessions.length === 0) {
+                historyList.innerHTML = '<li class="text-gray-500 italic text-sm text-center py-4">No history found in the cloud.</li>';
+                return;
+            }
+
+            // Group sessions by date
+            const groupedSessions = sessions.reduce((groups, session) => {
+                const dateKey = formatDateForGrouping(session.timestamp);
+                if (!groups[dateKey]) {
+                    groups[dateKey] = [];
+                }
+                groups[dateKey].push(session);
+                return groups;
+            }, {});
+
+            // Render groups
+            for (const dateKey in groupedSessions) {
+                // 1. Add Date Header
+                const headerLi = document.createElement('li');
+                headerLi.className = 'sticky top-0 bg-gray-800/95 py-2 mt-2 font-bold text-sm text-indigo-400 border-b border-indigo-600 uppercase tracking-wider text-center z-10';
+                headerLi.textContent = dateKey;
+                historyList.appendChild(headerLi);
+                
+                // 2. Add Sessions for this date
+                groupedSessions[dateKey].forEach((session) => {
+                    const cycles = session.cycles;
+                    const durationText = formatDuration(session.duration);
+                    // Get just the time for the row display (e.g., 07:45 PM)
+                    const time = new Date(session.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); 
+                    
+                    const li = document.createElement('li');
+                    li.className = 'flex justify-between items-center py-2 px-1 border-b border-gray-700/50 hover:bg-gray-700 transition duration-100';
+                    li.innerHTML = `
+                        <span class="text-sm font-semibold text-gray-300 w-1/3 text-left">${time}</span>
+                        <span class="text-lg font-bold text-indigo-400 w-1/3 text-center">${cycles} Cycles</span>
+                        <span class="text-sm text-gray-400 w-1/3 text-right">${durationText}</span>
+                    `;
+                    historyList.appendChild(li);
+                });
+            }
+        }
+
+        // Saves a new session data to Firestore
+        async function saveSession(cycles, duration) {
+            if (cycles <= 0 || !db || !userId) return;
 
             const newSession = {
                 cycles: cycles,
                 duration: duration,
-                timestamp: Date.now() 
+                timestamp: Date.now() // Store timestamp for sorting
             };
             
-            const transaction = db.transaction([STORE_NAME], 'readwrite');
-            const store = transaction.objectStore(STORE_NAME);
-            const request = store.add(newSession);
-
-            request.onsuccess = function() {
-                console.log("Session saved successfully to IndexedDB.");
-                loadSessionHistory(); // Refresh the display
-            };
-
-            request.onerror = function(event) {
-                console.error("Error saving session to IndexedDB:", event.target.error);
-            };
+            try {
+                // Firestore automatically updates the view via onSnapshot
+                await addDoc(collection(db, getSessionsPath()), newSession);
+                console.log("Session saved successfully to Firestore.");
+            } catch (error) {
+                console.error("Error saving session to Firestore:", error);
+                showMessage("Error saving session to cloud. Check console.", true);
+            }
         }
         
         // --- FILE OPERATIONS ---
 
-        // Function to handle loading of the external JSON file
+        // Function to handle loading of the external JSON file (merges into cloud)
         function loadHistoryFile(event) {
+            if (!db || !userId) {
+                showMessage("Cloud database not ready. Please wait for sync.", true);
+                return;
+            }
+
+            // Access the file from the event target
             const file = event.target.files[0];
             if (!file) return;
 
@@ -298,35 +376,28 @@
                         throw new Error("File content is not a valid JSON array.");
                     }
                     
-                    if (!db) {
-                        showMessage("Database not ready. Please try loading the file again.", true);
-                        return;
-                    }
-                    
-                    // Start transaction to add all sessions
-                    const transaction = db.transaction([STORE_NAME], 'readwrite');
-                    const store = transaction.objectStore(STORE_NAME);
-                    
+                    const sessionsRef = collection(db, getSessionsPath());
                     let importedCount = 0;
-                    externalSessions.forEach(session => {
-                        // Ensure required fields exist before importing
+                    
+                    // Use Promise.all to handle concurrent writes
+                    const writePromises = externalSessions.map(session => {
                         if (session.cycles !== undefined && session.duration !== undefined && session.timestamp !== undefined) {
-                            // Clear 'id' if present, so IndexedDB can assign a new one
-                            delete session.id; 
-                            store.add(session);
-                            importedCount++;
+                            // Only import valid session structure
+                            return addDoc(sessionsRef, {
+                                cycles: session.cycles,
+                                duration: session.duration,
+                                timestamp: session.timestamp // Use existing timestamp
+                            }).then(() => {
+                                importedCount++;
+                            });
                         }
+                        return Promise.resolve(); // Skip invalid entries
                     });
 
-                    transaction.oncomplete = () => {
-                        showMessage(`Successfully merged ${importedCount} sessions into local history!`);
-                        loadSessionHistory(); // Reload and display combined history
-                    };
+                    await Promise.all(writePromises);
 
-                    transaction.onerror = (err) => {
-                        console.error("IndexedDB import error:", err);
-                        showMessage("Error importing data into database. Check console for details.", true);
-                    };
+                    showMessage(`Successfully merged ${importedCount} sessions into cloud history!`);
+                    // loadSessionHistory will automatically refresh due to onSnapshot
 
                 } catch (error) {
                     console.error("Error processing file:", error);
@@ -337,24 +408,30 @@
             event.target.value = ''; // Clear file input
         }
         
-        // Function to download the entire IndexedDB history as a JSON file
-        function downloadHistory() {
-            if (!db) {
-                showMessage("Database not ready. Cannot download history.", true);
+        // Function to download the entire Firestore history as a JSON file
+        async function downloadHistory() {
+            if (!db || !userId) {
+                showMessage("Cloud database not ready. Cannot download history.", true);
                 return;
             }
             
-            const transaction = db.transaction([STORE_NAME], 'readonly');
-            const store = transaction.objectStore(STORE_NAME);
-            const request = store.getAll();
+            try {
+                const sessionsRef = collection(db, getSessionsPath());
+                const querySnapshot = await getDocs(sessionsRef);
+                
+                const sessions = [];
+                querySnapshot.forEach(doc => {
+                    sessions.push(doc.data());
+                });
 
-            request.onsuccess = function(event) {
-                const sessions = event.target.result || [];
                 if (sessions.length === 0) {
                     showMessage("No history to download!");
                     return;
                 }
                 
+                // Sort client-side before downloading
+                sessions.sort((a, b) => b.timestamp - a.timestamp);
+
                 // Use a Blob to create the file and trigger a download
                 const dataStr = JSON.stringify(sessions, null, 2);
                 const blob = new Blob([dataStr], { type: 'application/json' });
@@ -362,19 +439,17 @@
                 
                 const a = document.createElement('a');
                 a.href = url;
-                a.download = 'breathing_history.json';
+                a.download = `breathing_history_${new Date().toISOString().slice(0, 10)}.json`;
                 document.body.appendChild(a);
                 a.click();
                 document.body.removeChild(a);
                 URL.revokeObjectURL(url);
                 
                 showMessage(`Prepared ${sessions.length} sessions for download. Please save the file.`);
-            };
-
-            request.onerror = function(event) {
-                console.error("Error retrieving data for download:", event.target.error);
+            } catch (error) {
+                console.error("Error retrieving data for download:", error);
                 showMessage("Error preparing data for download. Check console.", true);
-            };
+            }
         }
 
 
@@ -454,7 +529,7 @@
             // Save the session if at least one cycle was completed
             if (cycleCount > 0) {
                 const sessionDuration = Date.now() - sessionStartTime;
-                saveSession(cycleCount, sessionDuration); // Saves to IndexedDB
+                saveSession(cycleCount, sessionDuration); // Saves to Firestore
             }
             
             toggleButton.textContent = "Start Breathing";
@@ -480,16 +555,15 @@
             }
         }
 
-        // Initialize the app state, open the database, and load history
+        // Initialize the app state and Firebase on load
         window.onload = async () => {
             stopBreathing(); // Sets initial UI state (Ready, 0 cycles)
-            try {
-                db = await openDB();
-                loadSessionHistory(); // Load any previously stored local data
-            } catch (e) {
-                console.error("Initialization failed:", e);
-                showMessage("Error initializing local database. History saving may not work.", true);
-            }
+            initFirebase();
+            
+            // --- Programmatically attach event listeners to fix the ReferenceError ---
+            toggleButton.addEventListener('click', toggleBreathing);
+            historyFileInput.addEventListener('change', loadHistoryFile);
+            downloadButton.addEventListener('click', downloadHistory);
         };
     </script>
 </body>
