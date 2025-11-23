@@ -72,8 +72,8 @@
         </div>
 
         <!-- Control Button -->
-        <button id="toggle-button" class="w-full py-3 px-6 rounded-lg font-bold text-lg text-white transition duration-200 shadow-lg transform hover:scale-[1.02] active:scale-[0.98]" style="background-color: #4f46e5;">
-            Start Breathing
+        <button id="toggle-button" class="w-full py-3 px-6 rounded-lg font-bold text-lg text-white transition duration-200 shadow-lg transform hover:scale-[1.02] active:scale-[0.98]" style="background-color: #4f46e5;" disabled>
+            Start Breathing (Sign In to Enable)
         </button>
     </div>
 
@@ -86,9 +86,24 @@
             Status: <span id="auth-status" class="font-semibold text-yellow-500">Connecting...</span>
             <div class="truncate mt-1">User ID: <span id="user-id-display" class="font-mono text-xs text-gray-500">Loading...</span></div>
         </div>
+        
+        <!-- NEW: Authentication Form -->
+        <div id="auth-form" class="mt-4 p-4 rounded-lg bg-gray-700/50 space-y-3 hidden">
+            <input type="email" id="auth-email" placeholder="Unique ID (Must be in email format: user@sync.me)" class="w-full p-2 rounded-lg bg-gray-900 text-white border border-gray-600 focus:ring-indigo-500 focus:border-indigo-500" />
+            <input type="password" id="auth-password" placeholder="Password (Min 6 characters)" class="w-full p-2 rounded-lg bg-gray-900 text-white border border-gray-600 focus:ring-indigo-500 focus:border-indigo-500" />
+            <div class="flex space-x-2">
+                <button id="sign-up-button" class="flex-1 py-2 rounded-lg font-bold text-white bg-indigo-600 hover:bg-indigo-700 transition">Sign Up</button>
+                <button id="sign-in-button" class="flex-1 py-2 rounded-lg font-bold text-white bg-green-600 hover:bg-green-700 transition">Sign In</button>
+            </div>
+        </div>
+        
+        <!-- NEW: Sign Out Button -->
+        <button id="sign-out-button" class="hidden w-full py-2 px-4 rounded-lg text-sm font-semibold text-white bg-red-600 hover:bg-red-700 transition duration-150 shadow-md mt-4">
+            Sign Out
+        </button>
 
         <!-- File Operations -->
-        <div class="flex flex-col space-y-3 mb-4">
+        <div id="file-operations" class="flex flex-col space-y-3 mb-4 mt-4 hidden">
             <!-- Load Button/Input (Merge/Upload) -->
             <label for="history-file-input" class="cursor-pointer w-full py-2 px-4 rounded-lg text-sm font-semibold text-center text-indigo-300 bg-indigo-900/50 hover:bg-indigo-900 transition duration-150 shadow-md">
                 Merge/Upload History File (JSON)
@@ -102,16 +117,25 @@
         </div>
 
         <!-- History List -->
-        <ul id="history-list" class="divide-y divide-gray-700 max-h-64 overflow-y-auto rounded-lg bg-gray-900/50 p-2">
+        <ul id="history-list" class="divide-y divide-gray-700 max-h-64 overflow-y-auto rounded-lg bg-gray-900/50 p-2 mt-4">
             <!-- History items will be inserted here by JavaScript -->
-            <li class="text-gray-500 italic text-sm text-center py-4">Waiting for cloud data...</li>
+            <li class="text-gray-500 italic text-sm text-center py-4">Sign in to load history.</li>
         </ul>
     </div>
 
 
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, setPersistence, browserLocalPersistence } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { 
+            getAuth, 
+            signInWithCustomToken, 
+            onAuthStateChanged, 
+            setPersistence, 
+            browserLocalPersistence,
+            createUserWithEmailAndPassword, // NEW
+            signInWithEmailAndPassword,     // NEW
+            signOut                         // NEW
+        } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, collection, addDoc, query, onSnapshot, getDocs, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // --- EXTERNAL FIREBASE CONFIGURATION (For GitHub Pages/Local Hosting) ---
@@ -167,7 +191,16 @@
         const authStatusDisplay = document.getElementById('auth-status');
         const userIdDisplay = document.getElementById('user-id-display');
         
-        // NEW REFERENCES for event listeners
+        // NEW AUTH UI REFERENCES
+        const authForm = document.getElementById('auth-form');
+        const authEmailInput = document.getElementById('auth-email');
+        const authPasswordInput = document.getElementById('auth-password');
+        const signInButton = document.getElementById('sign-in-button');
+        const signUpButton = document.getElementById('sign-up-button');
+        const signOutButton = document.getElementById('sign-out-button');
+        const fileOperations = document.getElementById('file-operations');
+        
+        // EXISTING REFERENCES for event listeners
         const historyFileInput = document.getElementById('history-file-input');
         const downloadButton = document.getElementById('download-button');
 
@@ -264,19 +297,33 @@
                 // Set up auth state change listener
                 onAuthStateChanged(auth, (user) => {
                     if (user) {
+                        // USER IS SIGNED IN
                         userId = user.uid;
                         authStatusDisplay.textContent = "Synced";
                         authStatusDisplay.classList.replace('text-yellow-500', 'text-green-500');
                         authStatusDisplay.classList.remove('text-orange-500');
                         userIdDisplay.textContent = userId;
+                        toggleButton.textContent = "Start Breathing";
+                        toggleButton.disabled = false;
                         
+                        authForm.classList.add('hidden');
+                        signOutButton.classList.remove('hidden');
+                        fileOperations.classList.remove('hidden');
+
                         // Start real-time listening for history
                         loadSessionHistory(); 
                     } else {
+                        // USER IS SIGNED OUT
                         userId = null;
-                        authStatusDisplay.textContent = "Signed Out";
+                        authStatusDisplay.textContent = "Signed Out (Required)";
                         authStatusDisplay.classList.replace('text-green-500', 'text-yellow-500');
                         userIdDisplay.textContent = "N/A";
+                        toggleButton.textContent = "Start Breathing (Sign In to Enable)";
+                        toggleButton.disabled = true;
+
+                        authForm.classList.remove('hidden');
+                        signOutButton.classList.add('hidden');
+                        fileOperations.classList.add('hidden');
 
                         // If the listener was active, stop it
                         if (unsubscribeSnapshot) {
@@ -287,22 +334,85 @@
                     }
                 });
 
-                // Sign in using the custom token (Canvas) or anonymously (GH Pages)
+                // Sign in using the custom token (Canvas only)
                 if (initialAuthToken) {
                     await signInWithCustomToken(auth, initialAuthToken);
-                } else {
-                    await signInAnonymously(auth);
-                }
+                } 
+                // No sign-in needed for GitHub Pages, onAuthStateChanged will handle the rest.
 
             } catch (error) {
                 console.error("Firebase initialization or authentication failed:", error);
                 authStatusDisplay.textContent = "Error";
                 authStatusDisplay.classList.replace('text-yellow-500', 'text-red-500');
-                showMessage(`Authentication failed: ${error.code || 'Unknown Error'}`, true);
+                showMessage(`Authentication failed: ${error.code || 'Unknown Error'}. Check console & enable Email/Password in Firebase.`, true);
             }
         }
         
-        // --- FIREBASE CRUD & HISTORY LOADING ---
+        // --- NEW: AUTH HANDLERS ---
+
+        async function handleSignUp() {
+            const email = authEmailInput.value.trim();
+            const password = authPasswordInput.value.trim();
+
+            if (!email || !password) {
+                showMessage("Email and password fields cannot be empty.", true);
+                return;
+            }
+            if (password.length < 6) {
+                showMessage("Password must be at least 6 characters long.", true);
+                return;
+            }
+
+            try {
+                await createUserWithEmailAndPassword(auth, email, password);
+                showMessage("Successfully signed up and logged in!", false);
+            } catch (error) {
+                console.error("Sign Up Error:", error);
+                // Display user-friendly error messages
+                let errorMessage = "Sign up failed.";
+                if (error.code === 'auth/email-already-in-use') {
+                    errorMessage = "This email is already in use. Please sign in instead.";
+                } else if (error.code === 'auth/invalid-email') {
+                    errorMessage = "Invalid email format.";
+                }
+                showMessage(errorMessage, true);
+            }
+        }
+
+        async function handleSignIn() {
+            const email = authEmailInput.value.trim();
+            const password = authPasswordInput.value.trim();
+
+            if (!email || !password) {
+                showMessage("Email and password fields cannot be empty.", true);
+                return;
+            }
+
+            try {
+                await signInWithEmailAndPassword(auth, email, password);
+                showMessage("Successfully signed in!", false);
+            } catch (error) {
+                console.error("Sign In Error:", error);
+                let errorMessage = "Sign in failed.";
+                if (error.code === 'auth/user-not-found' || error.code === 'auth/wrong-password') {
+                    errorMessage = "Invalid credentials. Please check your Unique ID and Password.";
+                }
+                showMessage(errorMessage, true);
+            }
+        }
+
+        async function handleSignOut() {
+            try {
+                await signOut(auth);
+                showMessage("Signed out successfully.", false);
+            } catch (error) {
+                console.error("Sign Out Error:", error);
+                showMessage("Sign out failed. Check console.", true);
+            }
+        }
+
+        
+        // --- FIREBASE CRUD & HISTORY LOADING (UNCHANGED) ---
 
         // Loads and displays the session history using Firestore onSnapshot
         function loadSessionHistory() {
@@ -338,7 +448,7 @@
             historyList.innerHTML = ''; // Clear existing list
 
             if (sessions.length === 0) {
-                historyList.innerHTML = '<li class="text-gray-500 italic text-sm text-center py-4">No history found in the cloud.</li>';
+                historyList.innerHTML = '<li class="text-gray-500 italic text-sm text-center py-4">No history found in the cloud. Start breathing to record!</li>';
                 return;
             }
 
@@ -382,8 +492,8 @@
         // Saves a new session data to Firestore
         async function saveSession(cycles, duration) {
             if (!isFirebaseReady || cycles <= 0 || !db || !userId) {
-                console.warn("Skipping session save: Firebase not ready (Offline Mode).");
-                showMessage("Session recorded locally, but not saved to cloud (Offline Mode).", true);
+                console.warn("Skipping session save: Firebase not ready or signed out.");
+                showMessage("Session recorded locally, but you must be signed in to sync data.", true);
                 return;
             }
 
@@ -403,7 +513,7 @@
             }
         }
         
-        // --- FILE OPERATIONS ---
+        // --- FILE OPERATIONS (UNCHANGED) ---
 
         // Function to handle loading of the external JSON file (merges into cloud)
         function loadHistoryFile(event) {
@@ -502,7 +612,7 @@
         }
 
 
-        // --- BREATHING LOGIC ---
+        // --- BREATHING LOGIC (UNCHANGED) ---
 
         function updateCycleDisplay() {
             cycleCountDisplay.textContent = cycleCount;
@@ -613,6 +723,11 @@
             toggleButton.addEventListener('click', toggleBreathing);
             historyFileInput.addEventListener('change', loadHistoryFile);
             downloadButton.addEventListener('click', downloadHistory);
+
+            // NEW: Auth button listeners
+            signUpButton.addEventListener('click', handleSignUp);
+            signInButton.addEventListener('click', handleSignIn);
+            signOutButton.addEventListener('click', handleSignOut);
         };
     </script>
 </body>
